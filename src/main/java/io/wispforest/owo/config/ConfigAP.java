@@ -3,6 +3,7 @@ package io.wispforest.owo.config;
 import io.wispforest.owo.config.annotation.Config;
 import io.wispforest.owo.config.annotation.Hook;
 import io.wispforest.owo.config.annotation.Nest;
+import io.wispforest.owo.config.annotation.Nullable;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 
@@ -34,6 +35,9 @@ public class ConfigAP extends AbstractProcessor {
             import java.util.HashMap;
             import java.util.Map;
             import java.util.function.Consumer;
+
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
 
             public class {wrapper_class_name} extends ConfigWrapper<{config_class_name}> {
 
@@ -67,19 +71,20 @@ public class ConfigAP extends AbstractProcessor {
             """;
 
     private static final String GET_ACCESSOR_TEMPLATE = """
+            {annotation}
             public {field_type} {field_name}() {
                 return {option_instance}.value();
             }
             """;
 
     private static final String SET_ACCESSOR_TEMPLATE = """
-            public void {field_name}({field_type} value) {
+            public void {field_name}({annotation}{field_type} value) {
                 {option_instance}.set(value);
             }
             """;
 
     private static final String SUBSCRIBE_TEMPLATE = """
-            public void subscribeTo{field_name}(Consumer<{field_type}> subscriber) {
+            public void subscribeTo{field_name}(@NotNull Consumer<{field_type}> subscriber) {
                 {option_instance}.observe(subscriber);
             }
             """;
@@ -116,11 +121,12 @@ public class ConfigAP extends AbstractProcessor {
                 var clazz = (TypeElement) annotated;
                 var className = clazz.getQualifiedName().toString();
                 var wrapperName = annotated.getAnnotation(Config.class).wrapperName();
+                var prefixedAccessors = annotated.getAnnotation(Config.class).prefixedAccessors();
 
                 try {
                     var file = this.processingEnv.getFiler().createSourceFile(wrapperName);
                     try (var writer = new PrintWriter(file.openWriter())) {
-                        writer.println(makeWrapper(wrapperName, className, this.collectFields(Option.Key.ROOT, clazz, clazz.getAnnotation(Config.class).defaultHook())));
+                        writer.println(makeWrapper(wrapperName, className, this.collectFields(Option.Key.ROOT, clazz, clazz.getAnnotation(Config.class).defaultHook()), prefixedAccessors));
                     }
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to generate config wrapper", e);
@@ -159,14 +165,15 @@ public class ConfigAP extends AbstractProcessor {
                 list.add(new NestField(fieldName, collectFields(parent.child(fieldName), typeElement, defaultHook), typeElement.getSimpleName().toString()));
             } else {
                 list.add(new ValueField(fieldName, parent.child(fieldName), field.asType(),
-                        defaultHook || field.getAnnotation(Hook.class) != null));
+                        defaultHook || field.getAnnotation(Hook.class) != null,
+                        field.getAnnotation(Nullable.class) != null));
             }
         }
 
         return list;
     }
 
-    private String makeWrapper(String wrapperClassName, String configClassName, List<ConfigField> fields) {
+    private String makeWrapper(String wrapperClassName, String configClassName, List<ConfigField> fields, boolean prefixAccessors) {
         var baseWrapper = WRAPPER_TEMPLATE
                 .replace("{wrapper_class_name}", wrapperClassName)
                 .replace("{package}", configClassName.substring(0, configClassName.lastIndexOf(".")))
@@ -191,7 +198,7 @@ public class ConfigAP extends AbstractProcessor {
         }
 
         for (var field : fields) {
-            field.appendAccessors(accessorMethods, optionInstances);
+            field.appendAccessors(accessorMethods, optionInstances, prefixAccessors);
         }
 
         return baseWrapper
@@ -200,15 +207,17 @@ public class ConfigAP extends AbstractProcessor {
                 .replace("{accessors}", accessorMethods.finish());
     }
 
-    private String makeGetAccessor(String fieldName, Option.Key fieldKey, TypeMirror fieldType) {
+    private String makeGetAccessor(String fieldName, Option.Key fieldKey, TypeMirror fieldType, String annotation) {
         return GET_ACCESSOR_TEMPLATE
+                .replace("{annotation}", annotation)
                 .replace("{option_instance}", constantNameOf(fieldKey))
                 .replace("{field_name}", fieldName)
                 .replace("{field_type}", fieldType.toString());
     }
 
-    private String makeSetAccessor(String fieldName, Option.Key fieldKey, TypeMirror fieldType) {
+    private String makeSetAccessor(String fieldName, Option.Key fieldKey, TypeMirror fieldType, String annotation) {
         return SET_ACCESSOR_TEMPLATE
+                .replace("{annotation}", annotation)
                 .replace("{option_instance}", constantNameOf(fieldKey))
                 .replace("{field_name}", fieldName)
                 .replace("{field_type}", fieldType.toString());
@@ -226,7 +235,7 @@ public class ConfigAP extends AbstractProcessor {
     }
 
     private interface ConfigField {
-        void appendAccessors(Writer accessors, Writer keyConstants);
+        void appendAccessors(Writer accessors, Writer keyConstants, boolean prefixAccessors);
     }
 
     private final class ValueField implements ConfigField {
@@ -234,37 +243,62 @@ public class ConfigAP extends AbstractProcessor {
         private final Option.Key key;
         private final TypeMirror type;
         private final boolean makeSubscribe;
+        private final boolean nullable;
 
-        private ValueField(String name, Option.Key key, TypeMirror type, boolean makeSubscribe) {
+        @NotNull private String getNullabilityAnnotation() {
+            if (nullable) {
+                return "@Nullable ";
+            }
+            if (!primitivesToWrappers.containsKey(type)) return "@NotNull ";
+            else return "";
+        }
+
+        private ValueField(String name, Option.Key key, TypeMirror type, boolean makeSubscribe, boolean nullable) {
             this.name = name;
             this.key = key;
             this.type = type;
             this.makeSubscribe = makeSubscribe;
+            this.nullable = nullable;
         }
 
         @Override
-        public void appendAccessors(Writer accessors, Writer optionInstances) {
+        public void appendAccessors(Writer accessors, Writer optionInstances, boolean prefixAccessors) {
             optionInstances.line("private final Option<" + primitivesToWrappers.getOrDefault(type, type) + "> " + constantNameOf(this.key) + " = this.optionForKey(new Option.Key(\"" + this.key.asString() + "\"));");
 
-            accessors.append(makeGetAccessor(this.name, this.key, this.type)).write("\n");
-            accessors.append(makeSetAccessor(this.name, this.key, this.type)).write("\n");
+            var annotation = getNullabilityAnnotation();
+
+            accessors.append(makeGetAccessor(this.name, this.key, this.type, annotation)).write("\n");
+            accessors.append(makeSetAccessor(this.name, this.key, this.type, annotation)).write("\n");
+
+            if (prefixAccessors) {
+                String accessorBaseName;
+                if (name.startsWith("is")) {
+                    accessorBaseName = name.substring(2);
+                    accessors.append(makeGetAccessor("is" + accessorBaseName, key, type, annotation));
+                    accessors.append(makeSetAccessor("set" + accessorBaseName, key, type, annotation));
+                } else {
+                    accessorBaseName = Character.toUpperCase(name.charAt(0)) + name.substring(1);
+                    accessors.append(makeGetAccessor("get" + accessorBaseName, key, type, annotation));
+                    accessors.append(makeSetAccessor("set" + accessorBaseName, key, type, annotation));
+                }
+            }
             if (this.makeSubscribe) accessors.append(makeSubscribe(capitalize(this.name), this.key, this.type)).write("\n");
         }
     }
 
     private record NestField(String nestName, List<ConfigField> children, String typeName) implements ConfigField {
         @Override
-        public void appendAccessors(Writer accessors, Writer optionInstances) {
+        public void appendAccessors(Writer accessors, Writer optionInstances, boolean prefixAccessors) {
             var nestClassName = capitalize(nestName);
             if (nestClassName.equals(typeName)) nestClassName += "_";
 
             // TODO replace type interface with class and instantiate instead of one class per field
 
-            accessors.beginLine("public final ").write(nestClassName).write(" ").write(nestName).write(" = new ").write(nestClassName).endLine("();");
+            accessors.beginLine("@NotNull public final ").write(nestClassName).write(" ").write(nestName).write(" = new ").write(nestClassName).endLine("();");
             accessors.beginLine("public class ").write(nestClassName).write(" implements ").write(typeName).endLine(" {");
             accessors.beginBlock();
             for (var child : children) {
-                child.appendAccessors(accessors, optionInstances);
+                child.appendAccessors(accessors, optionInstances, prefixAccessors);
             }
             accessors.endBlock();
             accessors.line("}");

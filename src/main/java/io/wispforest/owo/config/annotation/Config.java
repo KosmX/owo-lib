@@ -37,4 +37,9 @@ public @interface Config {
      * be saved whenever it is modified
      */
     boolean saveOnModification() default true;
+
+    /**
+     * @return {@code true} to generate getter/setters with kotlin names, making good usability from kotlin
+     */
+    boolean prefixedAccessors() default true;
 }
