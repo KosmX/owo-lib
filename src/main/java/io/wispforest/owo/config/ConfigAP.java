@@ -51,13 +51,15 @@ public class ConfigAP extends AbstractProcessor {
                     super({config_class_name}.class, janksonBuilder);
                 }
 
+                @NotNull
                 public static {wrapper_class_name} createAndLoad() {
                     var wrapper = new {wrapper_class_name}();
                     wrapper.load();
                     return wrapper;
                 }
 
-                public static {wrapper_class_name} createAndLoad(Consumer<Jankson.Builder> janksonBuilder) {
+                @NotNull
+                public static {wrapper_class_name} createAndLoad(@NotNull Consumer<Jankson.Builder> janksonBuilder) {
                     var wrapper = new {wrapper_class_name}(janksonBuilder);
                     wrapper.load();
                     return wrapper;
@@ -277,7 +279,7 @@ public class ConfigAP extends AbstractProcessor {
                     accessors.append(makeGetAccessor("is" + accessorBaseName, key, type, annotation));
                     accessors.append(makeSetAccessor("set" + accessorBaseName, key, type, annotation));
                 } else {
-                    accessorBaseName = Character.toUpperCase(name.charAt(0)) + name.substring(1);
+                    accessorBaseName = capitalize(name);
                     accessors.append(makeGetAccessor("get" + accessorBaseName, key, type, annotation));
                     accessors.append(makeSetAccessor("set" + accessorBaseName, key, type, annotation));
                 }
